@@ -1,6 +1,6 @@
-// 停車場車輛進出自動管理系統
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include "FreeRTOS.h"
 #include "task.h"
 #include "queue.h"
@@ -9,88 +9,88 @@
 #include "event_groups.h"
 #include "message_buffer.h"
 
-// 定義車位的狀態
-enum State
-{
-    eAvailable,  // 車位未占用
-    eOccupied    // 車位已佔用
+enum State {
+    eAvailable,
+    eOccupied
 };
 
-// 定義單個車位資訊
-struct Parking_Lot_t
-{
-    uint32_t ulCarID;           // 車牌號碼(4位數)
-    TickType_t xEntryTime;      // 進場時間
-    TickType_t xExitTime;       // 離場時間
-    enum State eState;          // 車位狀態
+struct Parking_Lot_t {
+    uint32_t ulCarID;
+    TickType_t xEntryTime;
+    TickType_t xExitTime;
+    enum State eState;
 };
 
-// 定義一個有24個停車位的停車場結構體
-struct Parking_Area_t
-{
-    struct Parking_Lot_t xLot[24];       // 用來記錄單個車位的使用狀況
-    SemaphoreHandle_t xParkingMutex;     // 用來控管 xLots[] 互斥存取
-    EventBits_t xParkingEventGroup;      // 以一 Event Group 對應各車位的繳費狀況
+struct Parking_Area_t {
+    struct Parking_Lot_t xLot[24];
+    SemaphoreHandle_t xParkingMutex;
+    EventGroupHandle_t xParkingEventGroup;
 } xArea;
 
-// 定義Queue和Timer相關句柄
 QueueHandle_t xParkingQueue;
 MessageBufferHandle_t xParkingMessageBuffer;
 TimerHandle_t xProxyTimer;
 
-// 設計一 Periodic Task vPeriodicTaskEntry，每 1~3 秒產生一 Software Interrupt 
+// Periodic Task: 模擬進場中斷
 static void ulEntryInterruptHandler(void);
 static void vPeriodicTaskEntry(void* pvParameters)
 {
     for (;;)
     {
-        vTaskDelay(pdMS_TO_TICKS(1000 + (rand() % 2000))); // 延遲1~3秒
+        vTaskDelay(pdMS_TO_TICKS(1000 + (rand() % 2000)));
         ulEntryInterruptHandler();
     }
 }
 
-// 進場ISR: 處理進場車輛
+// 模擬進場中斷
 void ulEntryInterruptHandler(void)
 {
-    uint32_t ulCarID = (rand() % 10000);                  // 產生四位車牌號碼
-    TickType_t xEntryTime = xTaskGetTickCount();          // 獲取目前的Tick Count
+    uint32_t ulCarID = (rand() % 10000);
+    TickType_t xEntryTime = xTaskGetTickCount();
 
-    // 封裝車輛資訊
     struct Parking_Lot_t xLot;
     xLot.ulCarID = ulCarID;
     xLot.xEntryTime = xEntryTime;
-    xLot.xExitTime = 0; // 進場時離場時間為0
+    xLot.xExitTime = 0;
     xLot.eState = eOccupied;
 
-    // 從中斷發送到隊列
     BaseType_t xHigherPriorityTaskWoken = pdFALSE;
     if (xQueueSendFromISR(xParkingQueue, &xLot, &xHigherPriorityTaskWoken) != pdPASS)
     {
         printf("[Error] 無法將車輛資訊加入隊列 (Queue Full)\n");
     }
 
-    // 如果需要，執行任務切換
     portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
 }
 
-// vEntry_Handler: 處理進場車輛
+// 將車輛資訊放入停車場陣列
 void vEntry_Handler(struct Parking_Lot_t* xLot)
 {
     if (xSemaphoreTake(xArea.xParkingMutex, portMAX_DELAY) == pdTRUE)
     {
-        for (int i = 0; i < 24; i++)
-        {
-            if (xArea.xLot[i].eState == eAvailable)
-            {
-                xArea.xLot[i] = *xLot;
-                printf("[Entry] 車位號碼: %d, 車牌號碼: %04u, 進場時間: %u ticks, 狀態: Occupied\n",
-                    i, xLot->ulCarID, (unsigned int)xLot->xEntryTime);
-                xSemaphoreGive(xArea.xParkingMutex);//釋放互斥鎖
-                return;
-            }
+        // 隨機選擇車位號碼
+        int i = rand() % 24;  // 產生隨機車位號碼
+
+        // 嘗試找到一個空閒車位
+        int attempts = 0;
+        while (xArea.xLot[i].eState == eOccupied && attempts < 24) {
+            i = (i + 1) % 24;  // 如果車位已佔用，繼續嘗試下一個車位
+            attempts++;
         }
-        printf("[Entry] 無可用車位, 車牌號碼: %04u\n", xLot->ulCarID);
-        xSemaphoreGive(xArea.xParkingMutex);//釋放互斥鎖
+
+        // 如果找到空閒車位，將車輛資訊放入該車位
+        if (xArea.xLot[i].eState == eAvailable)
+        {
+            xArea.xLot[i] = *xLot;  // 將車輛資訊放入停車場陣列
+            printf("[Entry] 車位號碼: %d, 車牌號碼: %04u, 進場時間: %u ticks, 狀態: Occupied\n",
+                i, xLot->ulCarID, (unsigned int)xLot->xEntryTime);
+        }
+        else
+        {
+            printf("[Entry] 無可用車位, 車牌號碼: %04u\n", xLot->ulCarID);
+        }
+
+        xSemaphoreGive(xArea.xParkingMutex);
     }
     else
     {
@@ -98,13 +98,14 @@ void vEntry_Handler(struct Parking_Lot_t* xLot)
     }
 }
 
-// 繳費任務
+
+// 定時隨機進行繳費
 static void vPeriodicTaskTolling(void* pvParameters)
 {
-    vTaskDelay(pdMS_TO_TICKS(10000)); // 延遲10秒
+    vTaskDelay(pdMS_TO_TICKS(10000));
     for (;;)
     {
-        vTaskDelay(pdMS_TO_TICKS(1000 + (rand() % 2000))); // 每1~3秒隨機延遲
+        vTaskDelay(pdMS_TO_TICKS(1000 + (rand() % 2000)));
         if (xSemaphoreTake(xArea.xParkingMutex, portMAX_DELAY) == pdTRUE)
         {
             for (int i = 0; i < 24; i++)
@@ -116,7 +117,7 @@ static void vPeriodicTaskTolling(void* pvParameters)
                     break;
                 }
             }
-            xSemaphoreGive(xArea.xParkingMutex);//釋放互斥鎖
+            xSemaphoreGive(xArea.xParkingMutex);
         }
         else
         {
@@ -125,7 +126,7 @@ static void vPeriodicTaskTolling(void* pvParameters)
     }
 }
 
-// 離場任務
+// 離場處理任務
 void vExitHandler(void* pvParameters)
 {
     EventBits_t uxBits;
@@ -142,13 +143,22 @@ void vExitHandler(void* pvParameters)
                     printf("[Exit] 車位號碼: %d, 車牌號碼: %04u, 進場時間: %u ticks, 離場時間: %u ticks, 狀態: Available\n",
                         i, xArea.xLot[i].ulCarID, (unsigned int)xArea.xLot[i].xEntryTime, (unsigned int)xArea.xLot[i].xExitTime);
 
-                    //更新車位資訊
+                    // 新增訊息發送到 ServerTask
+                    char message[128];
+                    snprintf(message, sizeof(message),
+                        "【離場】車位號碼: %d, 車牌號碼: %04u, 進場時間: %u ticks, 離場時間: %u ticks",
+                        i, xArea.xLot[i].ulCarID,
+                        (unsigned int)xArea.xLot[i].xEntryTime,
+                        (unsigned int)xArea.xLot[i].xExitTime);
+                    xMessageBufferSend(xParkingMessageBuffer, message, strlen(message) + 1, portMAX_DELAY);
+
+                    // 清空該車位
                     xArea.xLot[i].eState = eAvailable;
                     xArea.xLot[i].ulCarID = 0;
                     xArea.xLot[i].xEntryTime = 0;
                     xArea.xLot[i].xExitTime = 0;
 
-                    xSemaphoreGive(xArea.xParkingMutex);//釋放互斥鎖
+                    xSemaphoreGive(xArea.xParkingMutex);
                     break;
                 }
                 else
@@ -160,20 +170,22 @@ void vExitHandler(void* pvParameters)
     }
 }
 
-// Auto-Reload Timer 回調函數
+// Proxy Timer 回呼：處理進場資訊傳給 Server
 void prvProxyTimerCallback(TimerHandle_t xTimer)
 {
     struct Parking_Lot_t xLot;
     while (xQueueReceive(xParkingQueue, &xLot, 0) == pdPASS)
     {
+        vEntry_Handler(&xLot); // 進場處理
         char message[128];
-        snprintf(message, sizeof(message), "車位號碼: 未知, 車牌號碼: %04u, 進場時間: %u ticks, 離場時間: %u ticks",
-            xLot.ulCarID, (unsigned int)xLot.xEntryTime, (unsigned int)xLot.xExitTime);
+        snprintf(message, sizeof(message),
+            "【進場】車牌號碼: %04u, 進場時間: %u ticks",
+            xLot.ulCarID, (unsigned int)xLot.xEntryTime);
         xMessageBufferSend(xParkingMessageBuffer, message, strlen(message) + 1, portMAX_DELAY);
     }
 }
 
-// 伺服器任務
+// Server Task: 負責接收訊息
 void vServerTask(void* pvParameters)
 {
     char message[128];
@@ -186,10 +198,8 @@ void vServerTask(void* pvParameters)
     }
 }
 
-
 int main(void)
 {
-    // 初始化struct
     for (int i = 0; i < 24; i++)
     {
         xArea.xLot[i].eState = eAvailable;
@@ -199,36 +209,31 @@ int main(void)
     }
 
     xArea.xParkingMutex = xSemaphoreCreateMutex();
-    if (xArea.xParkingMutex == NULL)
-    {
+    if (xArea.xParkingMutex == NULL) {
         printf("[Error] 無法創建互斥鎖\n");
         return -1;
     }
 
     xArea.xParkingEventGroup = xEventGroupCreate();
-    if (xArea.xParkingEventGroup == NULL)
-    {
+    if (xArea.xParkingEventGroup == NULL) {
         printf("[Error] 無法創建事件組\n");
         return -1;
     }
 
     xParkingQueue = xQueueCreate(5, sizeof(struct Parking_Lot_t));
-    if (xParkingQueue == NULL)
-    {
+    if (xParkingQueue == NULL) {
         printf("[Error] 無法創建隊列\n");
         return -1;
     }
 
     xParkingMessageBuffer = xMessageBufferCreate(256);
-    if (xParkingMessageBuffer == NULL)
-    {
+    if (xParkingMessageBuffer == NULL) {
         printf("[Error] 無法創建訊息緩衝區\n");
         return -1;
     }
 
     xProxyTimer = xTimerCreate("ProxyTimer", pdMS_TO_TICKS(5000), pdTRUE, 0, prvProxyTimerCallback);
-    if (xProxyTimer == NULL || xTimerStart(xProxyTimer, 0) != pdPASS)
-    {
+    if (xProxyTimer == NULL || xTimerStart(xProxyTimer, 0) != pdPASS) {
         printf("[Error] 無法創建或啟動計時器\n");
         return -1;
     }
@@ -239,6 +244,5 @@ int main(void)
     xTaskCreate(vServerTask, "ServerTask", configMINIMAL_STACK_SIZE, NULL, 2, NULL);
 
     vTaskStartScheduler();
-
     for (;;);
 }
